@@ -1,0 +1,378 @@
+"""
+EPUB Builder - Create EPUB files from chapters
+Uses ebooklib for EPUB creation
+"""
+
+import os
+import io
+import re
+from typing import List, Optional, Callable
+from pathlib import Path
+
+from ebooklib import epub
+
+from core.parser import Chapter, NovelInfo
+from core.cleaner import ContentCleaner, is_chinese
+
+# Use curl_cffi for better compatibility (same as parser)
+try:
+    from curl_cffi.requests import Session as HttpSession
+    _http_session = HttpSession(impersonate="chrome120")
+    print("EPUB Builder: Using curl_cffi for image downloads")
+except ImportError:
+    import requests
+    _http_session = requests.Session()
+    _http_session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'
+    })
+    print("EPUB Builder: Using requests for image downloads")
+
+
+class EPUBBuilder:
+    """Build EPUB files from novel chapters."""
+    
+    def __init__(self, cleaner: Optional[ContentCleaner] = None):
+        self.cleaner = cleaner or ContentCleaner()
+    
+    def build(
+        self,
+        novel_info: NovelInfo,
+        chapters: List[Chapter],
+        output_path: str,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> str:
+        """
+        Build an EPUB file from chapters.
+        
+        Args:
+            novel_info: Novel metadata
+            chapters: List of chapters with content loaded
+            output_path: Where to save the EPUB
+            progress_callback: Optional callback(current, total, status)
+            
+        Returns:
+            Path to the created EPUB file
+        """
+        # Validate we have chapters with content
+        valid_chapters = [ch for ch in chapters if ch.content and len(ch.content.strip()) > 0]
+        if not valid_chapters:
+            raise ValueError("No chapters with content to build EPUB")
+        
+        print(f"Building EPUB with {len(valid_chapters)} chapters (from {len(chapters)} total)")
+        print(f"  Title: {novel_info.title}")
+        print(f"  Author: {novel_info.author}")
+        
+        book = epub.EpubBook()
+        
+        # Set metadata
+        book.set_identifier(f"novel-{hash(novel_info.title)}")
+        book.set_title(novel_info.title)
+        book.set_language('en')  # Set to English since we're translating
+        book.add_author(novel_info.author)
+        
+        if novel_info.description:
+            book.add_metadata('DC', 'description', novel_info.description)
+        
+        if novel_info.source_url:
+            book.add_metadata('DC', 'source', novel_info.source_url)
+        
+        for tag in novel_info.tags:
+            book.add_metadata('DC', 'subject', tag)
+        
+        # Add cover image if available
+        if novel_info.cover_url:
+            try:
+                print(f"  Downloading cover from: {novel_info.cover_url}")
+                cover_data = self._download_image(novel_info.cover_url)
+                if cover_data:
+                    print(f"  Cover downloaded: {len(cover_data)} bytes")
+                    # Determine image type
+                    ext = 'jpg'
+                    if novel_info.cover_url.lower().endswith('.png'):
+                        ext = 'png'
+                    elif novel_info.cover_url.lower().endswith('.gif'):
+                        ext = 'gif'
+                    
+                    book.set_cover(f"cover.{ext}", cover_data)
+                    print(f"  Cover added to EPUB as cover.{ext}")
+                else:
+                    print("  Warning: Cover download returned no data")
+            except Exception as e:
+                print(f"  Warning: Could not download cover image: {e}")
+        
+        # Create chapter items
+        epub_chapters = []
+        spine = ['nav']
+        
+        total = len(valid_chapters)
+        for idx, chapter in enumerate(valid_chapters):
+            if progress_callback:
+                progress_callback(idx + 1, total, f"Adding chapter: {chapter.title[:30]}...")
+            
+            # Clean content
+            content = chapter.content
+            if self.cleaner:
+                content = self.cleaner.clean_html(content)
+            
+            # Validate content isn't empty after cleaning
+            if not content or len(content.strip()) < 10:
+                print(f"Warning: Chapter {idx} '{chapter.title}' has empty content, using placeholder")
+                content = f"<p>Chapter content not available.</p>"
+            
+            # Create EPUB chapter
+            chapter_filename = f"chapter_{idx:04d}.xhtml"
+            epub_chapter = epub.EpubHtml(
+                title=chapter.title,
+                file_name=chapter_filename,
+                lang='en'  # Set to English
+            )
+            
+            # Wrap content in proper XHTML
+            xhtml_content = self._wrap_xhtml(chapter.title, content)
+            epub_chapter.content = xhtml_content.encode('utf-8')
+            
+            book.add_item(epub_chapter)
+            epub_chapters.append(epub_chapter)
+            spine.append(epub_chapter)
+        
+        # Validate we have chapters
+        if not epub_chapters:
+            raise ValueError("No valid chapters to include in EPUB")
+        
+        # Add navigation
+        book.toc = epub_chapters
+        book.spine = spine
+        
+        # Add required NCX and Nav
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        
+        # Add CSS
+        css = self._get_default_css()
+        nav_css = epub.EpubItem(
+            uid="style_nav",
+            file_name="style/nav.css",
+            media_type="text/css",
+            content=css.encode('utf-8')
+        )
+        book.add_item(nav_css)
+        
+        # Write EPUB
+        if progress_callback:
+            progress_callback(total, total, "Writing EPUB file...")
+        
+        print(f"Writing EPUB to: {output_path}")
+        try:
+            epub.write_epub(output_path, book, {})
+            file_size = os.path.getsize(output_path)
+            print(f"EPUB written successfully: {file_size} bytes ({file_size/1024:.1f} KB)")
+        except Exception as e:
+            print(f"Error writing EPUB: {e}")
+            raise
+        
+        return output_path
+    
+    def _download_image(self, url: str) -> Optional[bytes]:
+        """Download an image and return bytes using curl_cffi."""
+        try:
+            response = _http_session.get(url, timeout=30)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            print(f"  Image download error: {e}")
+            return None
+    
+    def _wrap_xhtml(self, title: str, content: str) -> str:
+        """Wrap content in proper XHTML structure."""
+        # Escape title for XML
+        title = title.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        return f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <title>{title}</title>
+    <link rel="stylesheet" type="text/css" href="style/nav.css"/>
+</head>
+<body>
+{content}
+</body>
+</html>'''
+    
+    def _get_default_css(self) -> str:
+        """Get default CSS for the EPUB."""
+        return '''
+body {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1em;
+    line-height: 1.6;
+    margin: 1em;
+    padding: 0;
+}
+
+h1 {
+    font-size: 1.5em;
+    margin-bottom: 1em;
+    text-align: center;
+}
+
+h2 {
+    font-size: 1.3em;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+
+p {
+    margin: 0.5em 0;
+    text-indent: 2em;
+}
+
+.chapter-title {
+    text-align: center;
+    font-weight: bold;
+    margin-bottom: 1em;
+}
+'''
+
+
+class TranslatedEPUBBuilder(EPUBBuilder):
+    """
+    EPUB Builder with translation support.
+    Translates title, author, chapter titles, and all content.
+    """
+    
+    def __init__(
+        self, 
+        cleaner: Optional[ContentCleaner] = None,
+        translator = None
+    ):
+        super().__init__(cleaner)
+        self.translator = translator
+    
+    def build_with_translation(
+        self,
+        novel_info: NovelInfo,
+        chapters: List[Chapter],
+        output_path: str,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> str:
+        """
+        Build EPUB with translation.
+        Translates: title, author, chapter titles (for TOC), and all content.
+        """
+        if not self.translator:
+            # No translator, just build normally
+            return self.build(novel_info, chapters, output_path, progress_callback)
+        
+        total_steps = len(chapters) * 2  # Clean + Translate phases
+        current_step = 0
+        
+        # Phase 1: Clean all chapters and collect ALL Chinese text for translation
+        if progress_callback:
+            progress_callback(0, total_steps, "Preparing for translation...")
+        
+        # Structure: list of (text_type, index, original_text)
+        # text_type: 'title', 'author', 'chapter_title', 'content'
+        all_texts = []
+        
+        # Collect novel title for translation
+        if is_chinese(novel_info.title):
+            all_texts.append(('title', 0, novel_info.title))
+            print(f"Will translate title: {novel_info.title}")
+        
+        # Collect author for translation  
+        if is_chinese(novel_info.author):
+            all_texts.append(('author', 0, novel_info.author))
+            print(f"Will translate author: {novel_info.author}")
+        
+        # Collect all chapter titles for translation (these become the TOC)
+        for idx, chapter in enumerate(chapters):
+            if is_chinese(chapter.title):
+                all_texts.append(('chapter_title', idx, chapter.title))
+        
+        print(f"Will translate {sum(1 for t in all_texts if t[0] == 'chapter_title')} chapter titles")
+        
+        # Clean chapters and collect content text
+        for idx, chapter in enumerate(chapters):
+            current_step += 1
+            if progress_callback:
+                progress_callback(current_step, total_steps, f"Cleaning: {chapter.title[:30]}...")
+            
+            # Clean content
+            if self.cleaner:
+                chapter.content = self.cleaner.clean_html(chapter.content)
+            
+            # Extract Chinese text segments for translation
+            texts = self._extract_text_segments(chapter.content)
+            for text in texts:
+                if is_chinese(text) and len(text.strip()) > 0:
+                    all_texts.append(('content', idx, text))
+        
+        # Phase 2: Translate all texts in one batch
+        if progress_callback:
+            progress_callback(current_step, total_steps, f"Translating {len(all_texts)} segments...")
+        
+        print(f"Total segments to translate: {len(all_texts)}")
+        
+        if all_texts:
+            texts_to_translate = [t[2] for t in all_texts]
+            
+            def translate_progress(completed, total):
+                nonlocal current_step
+                if progress_callback:
+                    pct = (completed / total) * len(chapters)
+                    progress_callback(
+                        int(len(chapters) + pct), 
+                        total_steps, 
+                        f"Translating: {completed}/{total}"
+                    )
+            
+            translated = self.translator.translate_texts(texts_to_translate, translate_progress)
+            
+            # Apply translations back
+            for i, (text_type, idx, original) in enumerate(all_texts):
+                if i < len(translated) and translated[i] and translated[i] != original:
+                    if text_type == 'title':
+                        print(f"Translated title: {novel_info.title} -> {translated[i]}")
+                        novel_info.title = translated[i]
+                    elif text_type == 'author':
+                        print(f"Translated author: {novel_info.author} -> {translated[i]}")
+                        novel_info.author = translated[i]
+                    elif text_type == 'chapter_title':
+                        # This is crucial - translating chapter titles fixes the TOC!
+                        chapters[idx].title = translated[i]
+                    elif text_type == 'content':
+                        chapters[idx].content = chapters[idx].content.replace(
+                            original, translated[i], 1
+                        )
+        
+        # Validate chapters have content
+        for idx, chapter in enumerate(chapters):
+            if not chapter.content or len(chapter.content.strip()) < 10:
+                print(f"Warning: Chapter {idx} '{chapter.title}' has empty/minimal content")
+                if not chapter.content:
+                    chapter.content = "<p>Chapter content not available.</p>"
+        
+        # Phase 3: Build EPUB with translated metadata and chapters
+        print(f"Building EPUB with translated content...")
+        print(f"  Final title: {novel_info.title}")
+        print(f"  Final author: {novel_info.author}")
+        return self.build(novel_info, chapters, output_path, progress_callback)
+    
+    def _extract_text_segments(self, html: str) -> List[str]:
+        """Extract text segments from HTML for translation."""
+        from bs4 import BeautifulSoup
+        
+        soup = BeautifulSoup(html, 'lxml')
+        texts = []
+        
+        # Get all text nodes
+        for element in soup.find_all(text=True):
+            text = str(element).strip()
+            if text and len(text) > 1:
+                # Skip if it's just whitespace or punctuation
+                if re.search(r'[\u4e00-\u9fff]', text):
+                    texts.append(text)
+        
+        return texts

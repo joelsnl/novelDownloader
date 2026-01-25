@@ -2,7 +2,9 @@
 
 A standalone Windows application for downloading Chinese web novels and translating them to English EPUBs.
 
-Based on WebToEpub extension and fixTranslate.py.
+Based on WebToEpub extension (by dteviot) and fixTranslate.py (from another project of mine).
+
+<img width="898" height="729" alt="image" src="https://github.com/user-attachments/assets/1a40bb3c-a92b-4c7b-a210-7fd50562a887" />
 
 ## Features
 

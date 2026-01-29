@@ -132,7 +132,7 @@ novel_downloader/
 
 ## Credits
 
-- Based on [WebToEpub](https://github.com/nicholasa/WebToEpub) browser extension
+- Based on [WebToEpub](https://github.com/dteviot/WebToEpub) browser extension
 - Translation logic from fixTranslate.py
 - Uses [ebooklib](https://github.com/aerkalov/ebooklib) for EPUB creation
 - GUI built with [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)

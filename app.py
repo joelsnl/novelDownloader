@@ -184,7 +184,7 @@ class NovelDownloaderApp(ctk.CTk):
         
         ctk.CTkLabel(right_opts, text="Translation Workers:").pack(side="left", padx=5)
         self.workers_entry = ctk.CTkEntry(right_opts, width=60)
-        self.workers_entry.insert(0, "50")
+        self.workers_entry.insert(0, "100")
         self.workers_entry.pack(side="left", padx=5)
         
         # === Progress Section ===
@@ -252,16 +252,23 @@ class NovelDownloaderApp(ctk.CTk):
     def _fetch_thread(self, url: str):
         """Fetch novel info in background thread."""
         try:
-            # Get novel info
-            print(f"Fetching novel info from: {url}")
-            self.novel_info = self.parser.get_novel_info(url)
-            print(f"Got novel info: {self.novel_info.title}")
-            self.after(0, lambda: self._update_status("Fetching chapter list..."))
-            
-            # Get chapter list
-            print("Fetching chapter list...")
-            self.chapters = self.parser.get_chapter_list(url)
-            print(f"Got {len(self.chapters)} chapters")
+            # Check if parser supports parallel fetching (faster)
+            if hasattr(self.parser, 'fetch_all_parallel'):
+                print(f"Fetching novel info and chapters in parallel...")
+                self.after(0, lambda: self._update_status("Fetching novel info & chapters (parallel)..."))
+                self.novel_info, self.chapters = self.parser.fetch_all_parallel(url)
+                print(f"Got novel info: {self.novel_info.title}")
+                print(f"Got {len(self.chapters)} chapters")
+            else:
+                # Fallback to sequential fetching
+                print(f"Fetching novel info from: {url}")
+                self.novel_info = self.parser.get_novel_info(url)
+                print(f"Got novel info: {self.novel_info.title}")
+                self.after(0, lambda: self._update_status("Fetching chapter list..."))
+                
+                print("Fetching chapter list...")
+                self.chapters = self.parser.get_chapter_list(url)
+                print(f"Got {len(self.chapters)} chapters")
             
             # Update UI in main thread
             self.after(0, self._update_chapter_list)
@@ -486,7 +493,7 @@ class NovelDownloaderApp(ctk.CTk):
                 try:
                     workers = int(self.workers_entry.get())
                 except ValueError:
-                    workers = 50
+                    workers = 100
                 translator = GoogleTranslator(max_workers=workers)
             
             # Build EPUB

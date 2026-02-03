@@ -2,19 +2,21 @@
 """
 Build script for creating standalone executable using PyInstaller
 """
-
 import os
 import sys
 import subprocess
 import shutil
 from pathlib import Path
 
-
 def build():
     """Build the application using PyInstaller."""
     
     # Get the directory of this script
     script_dir = Path(__file__).parent.absolute()
+    
+    # Determine OS-specific settings
+    separator = ';' if sys.platform == 'win32' else ':'
+    exe_name = "NovelDownloader.exe" if sys.platform == 'win32' else "NovelDownloader"
     
     # Check if PyInstaller is installed
     try:
@@ -60,8 +62,8 @@ def build():
         '--collect-all=customtkinter',
         
         # Add core and parsers as data (in case of import issues)
-        f'--add-data={script_dir / "core"};core',
-        f'--add-data={script_dir / "parsers"};parsers',
+        f'--add-data={script_dir / "core"}{separator}core',
+        f'--add-data={script_dir / "parsers"}{separator}parsers',
         
         # Main script
         str(script_dir / 'app.py'),
@@ -75,7 +77,7 @@ def build():
     result = subprocess.run(args, cwd=script_dir)
     
     if result.returncode == 0:
-        exe_path = script_dir / "dist" / "NovelDownloader.exe"
+        exe_path = script_dir / "dist" / exe_name
         if exe_path.exists():
             size_mb = exe_path.stat().st_size / (1024 * 1024)
             print()
@@ -89,7 +91,6 @@ def build():
     else:
         print("Build failed!")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     build()

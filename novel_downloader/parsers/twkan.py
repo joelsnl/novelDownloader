@@ -5,7 +5,8 @@ Based on WebToEpub TwkanParser.js
 
 import re
 import time
-from typing import List, Optional
+import concurrent.futures
+from typing import List, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from core.parser import BaseParser, Chapter, NovelInfo, register_parser
@@ -20,7 +21,11 @@ class TwkanParser(BaseParser):
     
     def __init__(self):
         super().__init__()
-        self.request_delay = 1.0  # 1 second between requests
+        # Higher delay to avoid 429 errors (like WebToEpub does for strict sites)
+        self.request_delay = 3.0  # 3 seconds between requests
+        # Cache for parallel fetching
+        self._cached_soup = None
+        self._cached_url = None
     
     def _extract_book_id(self, url: str) -> Optional[str]:
         """Extract book ID from URL."""
@@ -28,10 +33,58 @@ class TwkanParser(BaseParser):
         match = re.search(r'/(?:book|txt)/(\d+)', url)
         return match.group(1) if match else None
     
-    def get_novel_info(self, url: str) -> NovelInfo:
-        """Extract novel metadata from main page."""
-        soup = self.fetch_page(url)
+    def fetch_all_parallel(self, url: str) -> Tuple[NovelInfo, List[Chapter]]:
+        """
+        Fetch novel info and chapter list in parallel.
+        This is faster than calling get_novel_info() and get_chapter_list() separately.
         
+        Returns:
+            Tuple of (NovelInfo, List[Chapter])
+        """
+        book_id = self._extract_book_id(url)
+        if not book_id:
+            raise ValueError(f"Could not extract book ID from URL: {url}")
+        
+        ajax_url = f"https://twkan.com/ajax_novels/chapterlist/{book_id}.html"
+        
+        # Fetch both pages in parallel
+        main_soup = None
+        ajax_html = None
+        
+        def fetch_main():
+            nonlocal main_soup
+            main_soup = self.fetch_page(url)
+        
+        def fetch_ajax():
+            nonlocal ajax_html
+            ajax_html = self.fetch_html(ajax_url)
+        
+        print(f"  Fetching main page and chapter list in parallel...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(fetch_main),
+                executor.submit(fetch_ajax)
+            ]
+            # Wait for both to complete
+            concurrent.futures.wait(futures)
+            
+            # Check for exceptions
+            for future in futures:
+                if future.exception():
+                    raise future.exception()
+        
+        print(f"  Both fetches complete, parsing...")
+        
+        # Parse novel info from main page
+        novel_info = self._parse_novel_info(main_soup, url)
+        
+        # Parse chapter list from AJAX response
+        chapters = self._parse_chapter_list(ajax_html)
+        
+        return novel_info, chapters
+    
+    def _parse_novel_info(self, soup: BeautifulSoup, url: str) -> NovelInfo:
+        """Parse novel info from already-fetched soup."""
         # Try meta tags first (most reliable)
         title = ""
         author = "Unknown"
@@ -102,27 +155,8 @@ class TwkanParser(BaseParser):
             source_url=url
         )
     
-    def get_chapter_list(self, url: str) -> List[Chapter]:
-        """
-        Get full chapter list using AJAX endpoint.
-        This bypasses the "Load More" button entirely.
-        """
-        book_id = self._extract_book_id(url)
-        if not book_id:
-            raise ValueError(f"Could not extract book ID from URL: {url}")
-        
-        # First visit the main page (sets cookies, passes any checks)
-        print(f"  Visiting main page first...")
-        self.fetch_page(url)
-        
-        # Fetch full chapter list from AJAX endpoint
-        ajax_url = f"https://twkan.com/ajax_novels/chapterlist/{book_id}.html"
-        print(f"  Fetching chapters from: {ajax_url}")
-        
-        # Use fetch_html which handles browser/session automatically
-        html = self.fetch_html(ajax_url)
-        
-        # Parse the response - it's HTML with <ul><li><a>...</a></li>...</ul>
+    def _parse_chapter_list(self, html: str) -> List[Chapter]:
+        """Parse chapter list from AJAX HTML response."""
         soup = BeautifulSoup(html, 'lxml')
         
         chapters = []
@@ -144,6 +178,31 @@ class TwkanParser(BaseParser):
             ))
         
         return chapters
+    
+    def get_novel_info(self, url: str) -> NovelInfo:
+        """Extract novel metadata from main page."""
+        soup = self.fetch_page(url)
+        return self._parse_novel_info(soup, url)
+    
+    def get_chapter_list(self, url: str) -> List[Chapter]:
+        """
+        Get full chapter list using AJAX endpoint.
+        This bypasses the "Load More" button entirely.
+        """
+        book_id = self._extract_book_id(url)
+        if not book_id:
+            raise ValueError(f"Could not extract book ID from URL: {url}")
+        
+        # First visit the main page (sets cookies, passes any checks)
+        print(f"  Visiting main page first...")
+        self.fetch_page(url)
+        
+        # Fetch full chapter list from AJAX endpoint
+        ajax_url = f"https://twkan.com/ajax_novels/chapterlist/{book_id}.html"
+        print(f"  Fetching chapters from: {ajax_url}")
+        
+        html = self.fetch_html(ajax_url)
+        return self._parse_chapter_list(html)
     
     def get_chapter_content(self, chapter: Chapter) -> str:
         """Fetch and extract content for a single chapter."""

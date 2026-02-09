@@ -37,6 +37,10 @@ from core.parser import Chapter, NovelInfo, get_parser_for_url, cleanup_browser
 from core.cleaner import ContentCleaner
 from core.translator import GoogleTranslator
 from core.epub_builder import EPUBBuilder, TranslatedEPUBBuilder
+from core.updater import (
+    get_current_version, check_for_updates_async, download_update_async,
+    get_auto_check_updates, set_auto_check_updates, is_frozen
+)
 
 # Import parsers to register them
 import parsers
@@ -53,7 +57,7 @@ class NovelDownloaderApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        self.title("Novel Downloader & Translator")
+        self.title(f"Novel Downloader & Translator v{get_current_version()}")
         self.geometry("900x700")
         self.minsize(800, 600)
         
@@ -74,6 +78,10 @@ class NovelDownloaderApp(ctk.CTk):
         
         # Cleanup browser on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        
+        # Auto-check for updates on startup (if enabled)
+        if get_auto_check_updates():
+            self.after(2000, self._auto_check_updates)  # Check after 2 seconds
     
     def _on_close(self):
         """Handle window close - cleanup browser."""
@@ -225,6 +233,47 @@ class NovelDownloaderApp(ctk.CTk):
             hover_color="darkred"
         )
         self.cancel_btn.pack(side="left", padx=5)
+        
+        # === Footer with Version and Update ===
+        footer_frame = ctk.CTkFrame(self, fg_color="transparent")
+        footer_frame.grid(row=6, column=0, padx=10, pady=(0, 10), sticky="ew")
+        
+        # Version label on left
+        self.version_label = ctk.CTkLabel(
+            footer_frame, 
+            text=f"v{get_current_version()}", 
+            font=("", 11),
+            text_color="gray"
+        )
+        self.version_label.pack(side="left", padx=10)
+        
+        # Update section on right
+        update_frame = ctk.CTkFrame(footer_frame, fg_color="transparent")
+        update_frame.pack(side="right", padx=10)
+        
+        # Auto-update checkbox
+        self.auto_update_var = ctk.BooleanVar(value=get_auto_check_updates())
+        self.auto_update_cb = ctk.CTkCheckBox(
+            update_frame, 
+            text="Auto-check updates",
+            variable=self.auto_update_var,
+            command=self._on_auto_update_toggle,
+            font=("", 11),
+            checkbox_width=18,
+            checkbox_height=18
+        )
+        self.auto_update_cb.pack(side="left", padx=(0, 10))
+        
+        # Check for updates button
+        self.update_btn = ctk.CTkButton(
+            update_frame,
+            text="Check for Updates",
+            width=130,
+            height=28,
+            font=("", 11),
+            command=self._on_check_updates
+        )
+        self.update_btn.pack(side="left")
     
     def _on_fetch(self):
         """Handle fetch button click."""
@@ -360,18 +409,18 @@ class NovelDownloaderApp(ctk.CTk):
             messagebox.showwarning("Warning", "Please select at least one chapter")
             return
         
-        # Use translated title if available, otherwise original
+        # Auto-generate filename using translated title (or original if not available)
         title_for_filename = self.translated_title if self.translated_title else self.novel_info.title
         
-        # Create shortened filename like WebToEpub: "First...Last.epub"
-        clean_title = self._create_short_filename(title_for_filename)
+        # Clean filename - remove invalid characters
+        clean_title = "".join(c for c in title_for_filename if c.isalnum() or c in " ._-").strip()
+        clean_title = clean_title[:80]  # Limit length
         
         if not clean_title:
             clean_title = "novel"
         
-        # Save to central Downloads directory
-        downloads_dir = self._get_downloads_folder()
-        output_path = str(downloads_dir / f"{clean_title}.epub")
+        # Auto-save in app directory
+        output_path = str(self.app_dir / f"{clean_title}.epub")
         
         # If file exists, add number
         counter = 1
@@ -396,70 +445,13 @@ class NovelDownloaderApp(ctk.CTk):
         thread.daemon = True
         thread.start()
     
-    def _get_downloads_folder(self) -> Path:
-        """Get the user's Downloads folder."""
-        # Try common locations
-        if sys.platform == "win32":
-            # Windows: use USERPROFILE/Downloads
-            downloads = Path(os.environ.get("USERPROFILE", "")) / "Downloads"
-        else:
-            # macOS/Linux: use HOME/Downloads
-            downloads = Path(os.environ.get("HOME", "")) / "Downloads"
-        
-        # Fallback to app directory if Downloads doesn't exist
-        if not downloads.exists():
-            downloads = self.app_dir
-        
-        return downloads
-    
-    def _create_short_filename(self, title: str, max_length: int = 40) -> str:
-        """
-        Create a shortened filename like WebToEpub does.
-        Format: "FirstWord...LastWord" if title is too long.
-        """
-        # Clean the title - keep only safe characters
-        clean = "".join(c for c in title if c.isalnum() or c in " ._-").strip()
-        
-        # Replace multiple spaces with single space
-        clean = " ".join(clean.split())
-        
-        if not clean:
-            return "novel"
-        
-        # If short enough, return as-is
-        if len(clean) <= max_length:
-            return clean
-        
-        # Split into words
-        words = clean.split()
-        
-        if len(words) <= 2:
-            # Just truncate if only 1-2 words
-            return clean[:max_length]
-        
-        # Take first 2 words and last word, join with "..."
-        first_part = " ".join(words[:2])
-        last_part = words[-1]
-        
-        # Format: "First Two...Last"
-        shortened = f"{first_part}...{last_part}"
-        
-        # If still too long, truncate first part
-        if len(shortened) > max_length:
-            available = max_length - len(last_part) - 3  # 3 for "..."
-            first_part = first_part[:available].rstrip()
-            shortened = f"{first_part}...{last_part}"
-        
-        return shortened
-    
     def _download_thread(self, chapters: List[Chapter], output_path: str):
         """Download and build EPUB in background thread."""
         try:
             total = len(chapters)
-            delay = self.parser.request_delay
             
             # Phase 1: Download chapter content
-            self.after(0, lambda: self._update_status(f"Downloading chapters ({delay}s delay between requests)..."))
+            self.after(0, lambda: self._update_status("Downloading chapters..."))
             
             for idx, chapter in enumerate(chapters):
                 if self.cancel_requested:
@@ -475,12 +467,8 @@ class NovelDownloaderApp(ctk.CTk):
                 # Fetch chapter content
                 chapter.content = self.parser.get_chapter_content(chapter)
                 
-                # Delay to avoid rate limiting (shows in status)
-                if idx < total - 1:  # Don't wait after last chapter
-                    self.after(0, lambda i=idx, d=delay: self._update_status(
-                        f"Downloaded [{i+1}/{total}] - waiting {d}s..."
-                    ))
-                    time.sleep(delay)
+                # Small delay to avoid rate limiting
+                time.sleep(self.parser.request_delay)
             
             # Phase 2: Build EPUB
             self.after(0, lambda: self._update_status("Building EPUB..."))
@@ -604,6 +592,93 @@ class NovelDownloaderApp(ctk.CTk):
         """Show error message."""
         self.status_label.configure(text="Error")
         messagebox.showerror("Error", message)
+    
+    def _on_auto_update_toggle(self):
+        """Handle auto-update checkbox toggle."""
+        set_auto_check_updates(self.auto_update_var.get())
+    
+    def _auto_check_updates(self):
+        """Auto-check for updates on startup (silent unless update available)."""
+        def callback(has_update, latest_version, message):
+            if has_update:
+                self.after(0, lambda: self._show_update_available(latest_version, message))
+        
+        check_for_updates_async(callback)
+    
+    def _on_check_updates(self):
+        """Handle manual check for updates button click."""
+        self.update_btn.configure(state="disabled", text="Checking...")
+        
+        def callback(has_update, latest_version, message):
+            self.after(0, lambda: self.update_btn.configure(state="normal", text="Check for Updates"))
+            if has_update:
+                self.after(0, lambda: self._show_update_available(latest_version, message))
+            else:
+                self.after(0, lambda: messagebox.showinfo("Up to Date", message))
+        
+        check_for_updates_async(callback)
+    
+    def _show_update_available(self, latest_version: str, message: str):
+        """Show update available dialog and offer to download."""
+        result = messagebox.askyesno(
+            "Update Available",
+            f"{message}\n\nWould you like to download and install the update?",
+            icon="info"
+        )
+        
+        if result:
+            self._download_update()
+    
+    def _download_update(self):
+        """Download and install the update."""
+        # Import here to check if frozen
+        from core.updater import is_frozen
+        
+        # Create progress dialog
+        progress_window = ctk.CTkToplevel(self)
+        progress_window.title("Updating...")
+        progress_window.geometry("400x150")
+        progress_window.transient(self)
+        progress_window.grab_set()
+        
+        # Center the window
+        progress_window.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 150) // 2
+        progress_window.geometry(f"+{x}+{y}")
+        
+        # Progress UI
+        ctk.CTkLabel(progress_window, text="Downloading update...", font=("", 14)).pack(pady=(20, 10))
+        
+        progress_bar = ctk.CTkProgressBar(progress_window, width=350)
+        progress_bar.pack(pady=10)
+        progress_bar.set(0)
+        
+        status_label = ctk.CTkLabel(progress_window, text="Connecting...", font=("", 11))
+        status_label.pack(pady=5)
+        
+        def progress_callback(current, total, status):
+            self.after(0, lambda: progress_bar.set(current / total))
+            self.after(0, lambda s=status: status_label.configure(text=s))
+        
+        def completion_callback(success, message):
+            self.after(0, progress_window.destroy)
+            if success:
+                self.after(0, lambda: self._handle_update_complete(message))
+            else:
+                self.after(0, lambda: messagebox.showerror("Update Failed", message))
+        
+        download_update_async(progress_callback, completion_callback)
+    
+    def _handle_update_complete(self, message: str):
+        """Handle successful update completion."""
+        from core.updater import is_frozen
+        
+        messagebox.showinfo("Update Complete", message)
+        
+        # If running as compiled executable, close the app so the helper script can replace it
+        if is_frozen():
+            self.after(500, self._on_close)
 
 
 def main():

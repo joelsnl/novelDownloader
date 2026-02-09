@@ -17,3 +17,6 @@ customtkinter>=5.2.0
 
 # Image handling (for covers)
 Pillow>=9.0.0
+
+# Version comparison for auto-updater
+packaging>=21.0

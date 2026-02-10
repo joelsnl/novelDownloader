@@ -6,7 +6,7 @@ Note: This site uses GB18030 encoding for text.
 """
 
 import re
-import concurrent.futures
+import time
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -23,36 +23,87 @@ class Shuba69Parser(BaseParser):
     
     def __init__(self):
         super().__init__()
-        # Minimum delay between requests (site can be sensitive)
-        self.request_delay = 1.0
+        # Minimum delay between requests (site is sensitive to rapid requests)
+        self.request_delay = 1.5
+        # Store the base URL for Referer header
+        self._base_url = "https://www.69shuba.com"
+        self._last_page_url = None
+        
+        # Set up session headers for anti-bot bypass
+        self._setup_session_headers()
+    
+    def _setup_session_headers(self):
+        """Configure session with headers that work for 69shuba."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': self._base_url,
+        }
+        
+        # Update session headers based on client type
+        try:
+            # For curl_cffi
+            self.session.headers.update(headers)
+        except AttributeError:
+            # For requests
+            self.session.headers.update(headers)
+    
+    def _set_referer(self, referer: str):
+        """Update the Referer header in session."""
+        try:
+            self.session.headers['Referer'] = referer
+        except:
+            pass
     
     def _extract_book_id(self, url: str) -> Optional[str]:
         """Extract book ID from URL."""
-        # Matches: /book/12345.htm, /txt/12345/index.html, etc.
         match = re.search(r'/(?:book|txt)/(\d+)', url)
         return match.group(1) if match else None
     
-    def _fetch_with_encoding(self, url: str, retries: int = 3) -> BeautifulSoup:
+    def _fetch_with_encoding(self, url: str, referer: str = None, retries: int = 3) -> BeautifulSoup:
         """
-        Fetch page with GB18030 encoding (site doesn't declare encoding properly).
+        Fetch page with GB18030 encoding and proper headers.
         """
         last_error = None
-        rate_limit_retry = 0
+        
+        # Set referer before request
+        if referer:
+            self._set_referer(referer)
+        elif self._last_page_url:
+            self._set_referer(self._last_page_url)
+        else:
+            self._set_referer(self._base_url)
         
         for attempt in range(retries):
             try:
+                # Add small delay between requests
+                if attempt > 0:
+                    time.sleep(self.request_delay)
+                
                 response = self.session.get(url, timeout=30)
                 
                 if response.status_code == 429:
-                    if rate_limit_retry < len(self.rate_limit_delays):
-                        wait = self.rate_limit_delays[rate_limit_retry]
-                        print(f"  Rate limited (429). Waiting {wait}s...")
-                        import time
-                        time.sleep(wait)
-                        rate_limit_retry += 1
-                        continue
+                    wait = self.rate_limit_delays[min(attempt, len(self.rate_limit_delays)-1)]
+                    print(f"  Rate limited (429). Waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                
+                if response.status_code == 403:
+                    print(f"  Got 403 on attempt {attempt + 1}, trying different referer...")
+                    # Try with the book index page as referer
+                    book_id = self._extract_book_id(url)
+                    if book_id:
+                        self._set_referer(f"{self._base_url}/book/{book_id}/")
+                    time.sleep(2)
+                    continue
                 
                 response.raise_for_status()
+                
+                # Store this URL as referer for next request
+                self._last_page_url = url
                 
                 # Decode with GB18030 encoding
                 content = response.content.decode('gb18030', errors='replace')
@@ -62,18 +113,22 @@ class Shuba69Parser(BaseParser):
                 last_error = e
                 print(f"  Attempt {attempt + 1}/{retries} failed: {e}")
                 if attempt < retries - 1:
-                    import time
                     time.sleep(2 ** (attempt + 1))
         
         raise last_error
     
     def fetch_all_parallel(self, url: str) -> Tuple[NovelInfo, List[Chapter]]:
         """
-        Fetch novel info and chapter list in parallel.
+        Fetch novel info and chapter list.
         """
+        # Extract base URL for referer
+        if '69shuba' in url or '69shu' in url:
+            self._base_url = '/'.join(url.split('/')[:3])
+            self._setup_session_headers()
+        
         # First get the main page to find TOC URL
         print(f"  Fetching main page...")
-        main_soup = self._fetch_with_encoding(url)
+        main_soup = self._fetch_with_encoding(url, referer=self._base_url)
         
         # Find TOC URL (the "more" button)
         toc_link = main_soup.select_one("a.more-btn")
@@ -85,7 +140,10 @@ class Shuba69Parser(BaseParser):
             toc_url = urljoin(url, toc_url)
         
         print(f"  Fetching TOC from: {toc_url}")
-        toc_soup = self._fetch_with_encoding(toc_url)
+        toc_soup = self._fetch_with_encoding(toc_url, referer=url)
+        
+        # Store TOC URL - this will be used as referer for chapter downloads
+        self._last_page_url = toc_url
         
         # Parse novel info from main page
         novel_info = self._parse_novel_info(main_soup, url)
@@ -147,7 +205,6 @@ class Shuba69Parser(BaseParser):
         # Chapter links are in #catalog ul
         menu = soup.select_one("#catalog ul")
         if not menu:
-            # Fallback: try other common selectors
             menu = soup.select_one(".catalog ul, .mulu ul, #list ul")
         
         if not menu:
@@ -159,7 +216,6 @@ class Shuba69Parser(BaseParser):
             if not href:
                 continue
             
-            # Make URL absolute
             if not href.startswith('http'):
                 href = urljoin(base_url, href)
             
@@ -185,16 +241,19 @@ class Shuba69Parser(BaseParser):
     
     def get_novel_info(self, url: str) -> NovelInfo:
         """Extract novel metadata from main page."""
+        self._base_url = '/'.join(url.split('/')[:3])
+        self._setup_session_headers()
         soup = self._fetch_with_encoding(url)
         return self._parse_novel_info(soup, url)
     
     def get_chapter_list(self, url: str) -> List[Chapter]:
         """Get full chapter list."""
-        # First get main page to find TOC link
+        self._base_url = '/'.join(url.split('/')[:3])
+        self._setup_session_headers()
+        
         print(f"  Fetching main page...")
         main_soup = self._fetch_with_encoding(url)
         
-        # Find TOC URL
         toc_link = main_soup.select_one("a.more-btn")
         if not toc_link:
             raise ValueError("Could not find chapter list link")
@@ -204,13 +263,27 @@ class Shuba69Parser(BaseParser):
             toc_url = urljoin(url, toc_url)
         
         print(f"  Fetching TOC from: {toc_url}")
-        toc_soup = self._fetch_with_encoding(toc_url)
+        toc_soup = self._fetch_with_encoding(toc_url, referer=url)
+        self._last_page_url = toc_url
         
         return self._parse_chapter_list(toc_soup, toc_url)
     
     def get_chapter_content(self, chapter: Chapter) -> str:
         """Fetch and extract content for a single chapter."""
-        soup = self._fetch_with_encoding(chapter.url)
+        # Use stored referer (TOC page or previous chapter)
+        referer = self._last_page_url
+        if not referer:
+            # Fallback: construct TOC URL from chapter URL
+            book_id = self._extract_book_id(chapter.url)
+            if book_id:
+                referer = f"{self._base_url}/book/{book_id}/"
+            else:
+                referer = self._base_url
+        
+        # Small delay between chapter fetches
+        time.sleep(self.request_delay)
+        
+        soup = self._fetch_with_encoding(chapter.url, referer=referer)
         
         # Content is in div.txtnav
         content_el = soup.select_one("div.txtnav")
@@ -223,7 +296,7 @@ class Shuba69Parser(BaseParser):
             for el in content_el.select(selector):
                 el.decompose()
         
-        # Get chapter title from page (might be more accurate than TOC title)
+        # Get chapter title from page
         title_el = soup.select_one("h1, .txtnav h1")
         chapter_title = title_el.get_text(strip=True) if title_el else chapter.title
         
@@ -232,27 +305,3 @@ class Shuba69Parser(BaseParser):
         html += str(content_el)
         
         return html
-
-
-# For testing
-if __name__ == "__main__":
-    parser = Shuba69Parser()
-    
-    test_url = "https://www.69shuba.com/book/12345.htm"  # Replace with actual URL
-    
-    print("Fetching novel info...")
-    try:
-        info = parser.get_novel_info(test_url)
-        print(f"Title: {info.title}")
-        print(f"Author: {info.author}")
-        print(f"Cover: {info.cover_url}")
-        
-        print("\nFetching chapter list...")
-        chapters = parser.get_chapter_list(test_url)
-        print(f"Found {len(chapters)} chapters")
-        
-        if chapters:
-            print(f"\nFirst chapter: {chapters[0]}")
-            print(f"Last chapter: {chapters[-1]}")
-    except Exception as e:
-        print(f"Error: {e}")

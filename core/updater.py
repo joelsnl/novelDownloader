@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Callable
 
 # Current version - UPDATE THIS WITH EACH RELEASE
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # GitHub repository info
 GITHUB_REPO = "joelsnl/novelDownloader"

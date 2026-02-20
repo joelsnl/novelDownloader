@@ -1,8 +1,16 @@
 """
-Google Translate (Free) - Concurrent translation with retry logic
-Based on fixTranslate.py GoogleFreeTranslate implementation
+Google Translate (Free) - Concurrent translation with persistent retry
+
+Persistent retry system:
+- Keeps retrying ALL failed translations until everything is done (or cancelled)
+- Smart escalating delays between passes: workers scale down, intervals widen,
+  cooldowns lengthen, per-request retries increase
+- Stall detection: if no progress for 3+ passes, switches to maximum backoff
+- Cache is cleared for failed entries before each retry so fresh requests are made
+- Cancellable at any point via cancel() method
 """
 
+import re
 import requests
 import time
 import threading
@@ -11,7 +19,7 @@ from typing import List, Tuple, Dict, Optional, Callable
 
 
 class GoogleTranslator:
-    """Google Translate Free API with concurrent requests and retry logic."""
+    """Google Translate Free API with concurrent requests, retry logic, and multi-pass retry."""
     
     ENDPOINT = 'https://translate.googleapis.com/translate_a/single'
     USER_AGENT = (
@@ -26,7 +34,7 @@ class GoogleTranslator:
         max_workers: int = 100,
         request_timeout: int = 15,
         max_retries: int = 5,
-        request_interval: float = 0.0
+        request_interval: float = 0.0,
     ):
         self.source_lang = source_lang
         self.target_lang = target_lang
@@ -42,7 +50,8 @@ class GoogleTranslator:
             'characters_translated': 0,
             'cache_hits': 0,
             'errors': 0,
-            'retries': 0
+            'retries': 0,
+            'retry_passes': 0,
         }
         
         # Thread-safe cache and counters
@@ -217,17 +226,211 @@ class GoogleTranslator:
         
         return results
     
+    def translate_texts_with_retry(
+        self,
+        texts: List[str],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        is_chinese_fn=None,
+        count_chinese_fn=None,
+        pass_callback: Optional[Callable[[int, int, int, float], None]] = None,
+    ) -> List[str]:
+        """
+        Translate texts and keep retrying ALL failures until everything is done.
+        
+        Uses a smart delay system that escalates between retry passes:
+        - Workers scale down:   100 → 50 → 30 → 20 → 10 → 5 (floor)
+        - Request interval up:  0 → 0.3 → 0.5 → 1.0 → 1.5 → 2.0 (cap)
+        - Cooldown between passes: 5 → 10 → 20 → 30 → 60 → 60 (cap at 60s)
+        - Per-request retries increase: base → +1 → +2 (cap at base+3)
+        
+        Keeps looping until zero failures remain or cancelled.
+        
+        Args:
+            texts: List of texts to translate
+            progress_callback: Optional callback(completed, total) for per-text progress
+            is_chinese_fn: Function to check if text contains Chinese
+            count_chinese_fn: Function to count Chinese chars
+            pass_callback: Optional callback(pass_number, remaining, total, cooldown)
+                           called at the start of each retry pass
+            
+        Returns:
+            List of translated texts
+        """
+        if not texts:
+            return []
+        
+        # Use default Chinese detection if not provided
+        if is_chinese_fn is None:
+            is_chinese_fn = self._contains_chinese
+        if count_chinese_fn is None:
+            count_chinese_fn = self._count_chinese
+        
+        # Smart delay escalation tables
+        # Each index = retry pass number (0-based), values plateau at the last entry
+        WORKER_STEPS    = [0, 50, 30, 20, 10, 5]       # 0 = use initial max_workers
+        INTERVAL_STEPS  = [0.0, 0.3, 0.5, 1.0, 1.5, 2.0]
+        COOLDOWN_STEPS  = [0, 5, 10, 20, 30, 60]
+        EXTRA_RETRIES   = [0, 0, 1, 1, 2, 3]
+        
+        def _get_step(table, pass_num):
+            """Get value from escalation table, clamping to last entry."""
+            idx = min(pass_num, len(table) - 1)
+            return table[idx]
+        
+        # ── Pass 1: Full-speed initial translation ──
+        results = self.translate_texts(texts, progress_callback)
+        
+        # ── Retry loop: keep going until nothing left ──
+        retry_pass = 0
+        prev_failed_count = None  # Track if we're making progress
+        stall_count = 0           # How many passes with no improvement
+        
+        while not self._cancel_requested:
+            # Scan for remaining Chinese
+            failed_indices = []
+            for i, result in enumerate(results):
+                if result and is_chinese_fn(result):
+                    chinese_count = count_chinese_fn(result)
+                    if chinese_count > 5:
+                        failed_indices.append(i)
+            
+            if not failed_indices:
+                break  # 🎉 Everything translated
+            
+            retry_pass += 1
+            
+            with self.stats_lock:
+                self.stats['retry_passes'] += 1
+            
+            # ── Smart delay: pick settings for this pass ──
+            workers_cap  = _get_step(WORKER_STEPS, retry_pass)
+            interval     = _get_step(INTERVAL_STEPS, retry_pass)
+            cooldown     = _get_step(COOLDOWN_STEPS, retry_pass)
+            extra_retry  = _get_step(EXTRA_RETRIES, retry_pass)
+            
+            # Stall detection: if no progress for 3+ passes, go even slower
+            if prev_failed_count is not None and len(failed_indices) >= prev_failed_count:
+                stall_count += 1
+                if stall_count >= 3:
+                    # Force maximum backoff
+                    cooldown = max(cooldown, 90)
+                    interval = max(interval, 2.5)
+                    workers_cap = min(workers_cap or 3, 3)
+            else:
+                stall_count = 0
+            prev_failed_count = len(failed_indices)
+            
+            # Resolve actual worker count
+            retry_workers = min(
+                workers_cap if workers_cap > 0 else self.max_workers,
+                len(failed_indices)
+            )
+            
+            # ── Log & callback ──
+            print(f"\n  ⟳ Retry pass {retry_pass}: {len(failed_indices)} segments remaining "
+                  f"(workers={retry_workers}, interval={interval:.1f}s, "
+                  f"cooldown={cooldown}s, retries={self.max_retries + extra_retry})")
+            
+            if pass_callback:
+                pass_callback(retry_pass, len(failed_indices), len(texts), cooldown)
+            
+            # ── Cooldown between passes ──
+            if cooldown > 0:
+                print(f"  ⏳ Cooling down for {cooldown}s before retry...")
+                # Sleep in 1s chunks so cancellation is responsive
+                for _ in range(cooldown):
+                    if self._cancel_requested:
+                        break
+                    time.sleep(1)
+            
+            if self._cancel_requested:
+                break
+            
+            # ── Clear cache for failed texts ──
+            with self.cache_lock:
+                for i in failed_indices:
+                    cache_key = texts[i].strip()
+                    self.cache.pop(cache_key, None)
+            
+            # ── Apply retry settings ──
+            old_interval = self.request_interval
+            old_max_retries = self.max_retries
+            self.request_interval = max(interval, old_interval)
+            self.max_retries = old_max_retries + extra_retry
+            
+            # Reset progress
+            self.total = len(failed_indices)
+            self.completed = 0
+            
+            # ── Translate failed texts ──
+            failed_texts = [texts[i] for i in failed_indices]
+            retry_results = [''] * len(failed_texts)
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=retry_workers) as executor:
+                futures = {
+                    executor.submit(self._translate_single, text, idx): idx
+                    for idx, text in enumerate(failed_texts)
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    if self._cancel_requested:
+                        break
+                    try:
+                        idx, translated = future.result()
+                        retry_results[idx] = translated
+                    except Exception:
+                        pass
+            
+            # ── Apply only improved translations ──
+            improved = 0
+            for j, i in enumerate(failed_indices):
+                translated = retry_results[j]
+                if translated and not is_chinese_fn(translated):
+                    results[i] = translated
+                    improved += 1
+            
+            # ── Restore original settings ──
+            self.request_interval = old_interval
+            self.max_retries = old_max_retries
+            
+            print(f"  ✓ Pass {retry_pass} done: {improved}/{len(failed_indices)} newly translated")
+        
+        # Final summary
+        final_failed = sum(
+            1 for i, r in enumerate(results)
+            if r and is_chinese_fn(r) and count_chinese_fn(r) > 5
+        )
+        if final_failed == 0:
+            print(f"\n  ✅ All {len(texts)} segments translated successfully "
+                  f"({retry_pass} retry pass{'es' if retry_pass != 1 else ''})")
+        elif self._cancel_requested:
+            print(f"\n  ⚠ Translation cancelled with {final_failed} segments remaining")
+        
+        return results
+    
     def translate_text(self, text: str) -> str:
         """Translate a single text (convenience method)."""
         results = self.translate_texts([text])
         return results[0] if results else text
     
     @staticmethod
+    def _contains_chinese(text: str) -> bool:
+        """Check if text contains Chinese characters."""
+        if not text:
+            return False
+        return bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
+    
+    @staticmethod
+    def _count_chinese(text: str) -> int:
+        """Count Chinese characters in text."""
+        if not text:
+            return 0
+        return len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
+    
+    @staticmethod
     def is_chinese(text: str) -> bool:
         """Check if text contains significant Chinese characters."""
         if not text:
             return False
-        import re
         chinese_count = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
         return chinese_count > len(text) * 0.1  # More than 10% Chinese
     
@@ -243,7 +446,8 @@ class GoogleTranslator:
             'characters_translated': 0,
             'cache_hits': 0,
             'errors': 0,
-            'retries': 0
+            'retries': 0,
+            'retry_passes': 0,
         }
         self.failed_texts.clear()
     

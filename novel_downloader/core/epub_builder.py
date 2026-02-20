@@ -1,19 +1,25 @@
 """
 EPUB Builder - Create EPUB files from chapters
-Uses ebooklib for EPUB creation
+Uses ebooklib for EPUB creation.
+
+New features ported from fixTranslate.py:
+- Translation verification: counts remaining Chinese chars after translation,
+  warns about chapters with significant untranslated content
+- Uses multi-pass retry translation (translate_texts_with_retry)
+- Reports files_with_remaining_chinese in stats
 """
 
 import os
 import io
 import re
 import requests
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Tuple
 from pathlib import Path
 
 from ebooklib import epub
 
 from core.parser import Chapter, NovelInfo
-from core.cleaner import ContentCleaner, is_chinese
+from core.cleaner import ContentCleaner, is_chinese, count_chinese_chars
 
 
 class EPUBBuilder:
@@ -197,16 +203,27 @@ p {
 class TranslatedEPUBBuilder(EPUBBuilder):
     """
     EPUB Builder with translation support.
-    Integrates with the translator to translate content as it's added.
+    Translates title, author, chapter titles, and all content.
+    
+    New features from fixTranslate.py:
+    - Uses multi-pass retry translation for better reliability
+    - Translation verification: counts remaining Chinese characters
+      after translation and warns about chapters with significant
+      untranslated content
     """
     
     def __init__(
         self, 
         cleaner: Optional[ContentCleaner] = None,
-        translator = None
+        translator=None,
+        verify_translation: bool = True,
     ):
         super().__init__(cleaner)
         self.translator = translator
+        self.verify_translation = verify_translation
+        
+        # Track chapters with remaining Chinese after translation
+        self.chapters_with_chinese: List[Tuple[str, int]] = []
     
     def build_with_translation(
         self,
@@ -217,21 +234,43 @@ class TranslatedEPUBBuilder(EPUBBuilder):
     ) -> str:
         """
         Build EPUB with translation.
-        First collects all Chinese text, translates in batch, then builds EPUB.
+        Translates: title, author, chapter titles (for TOC), and all content.
+        Uses multi-pass retry for better translation reliability.
         """
         if not self.translator:
             # No translator, just build normally
             return self.build(novel_info, chapters, output_path, progress_callback)
         
+        self.chapters_with_chinese = []
         total_steps = len(chapters) * 2  # Clean + Translate phases
         current_step = 0
         
-        # Phase 1: Clean all chapters and collect Chinese text
+        # Phase 1: Clean all chapters and collect ALL Chinese text for translation
         if progress_callback:
-            progress_callback(0, total_steps, "Cleaning chapters...")
+            progress_callback(0, total_steps, "Preparing for translation...")
         
-        all_texts = []  # List of (chapter_idx, text)
+        # Structure: list of (text_type, index, original_text)
+        # text_type: 'title', 'author', 'chapter_title', 'content'
+        all_texts = []
         
+        # Collect novel title for translation
+        if is_chinese(novel_info.title):
+            all_texts.append(('title', 0, novel_info.title))
+            print(f"Will translate title: {novel_info.title}")
+        
+        # Collect author for translation  
+        if is_chinese(novel_info.author):
+            all_texts.append(('author', 0, novel_info.author))
+            print(f"Will translate author: {novel_info.author}")
+        
+        # Collect all chapter titles for translation (these become the TOC)
+        for idx, chapter in enumerate(chapters):
+            if is_chinese(chapter.title):
+                all_texts.append(('chapter_title', idx, chapter.title))
+        
+        print(f"Will translate {sum(1 for t in all_texts if t[0] == 'chapter_title')} chapter titles")
+        
+        # Clean chapters and collect content text
         for idx, chapter in enumerate(chapters):
             current_step += 1
             if progress_callback:
@@ -242,18 +281,19 @@ class TranslatedEPUBBuilder(EPUBBuilder):
                 chapter.content = self.cleaner.clean_html(chapter.content)
             
             # Extract Chinese text segments for translation
-            # Simple approach: find all text between tags
             texts = self._extract_text_segments(chapter.content)
             for text in texts:
                 if is_chinese(text) and len(text.strip()) > 0:
-                    all_texts.append((idx, text))
+                    all_texts.append(('content', idx, text))
         
-        # Phase 2: Translate all texts
-        if all_texts and progress_callback:
+        # Phase 2: Translate all texts in one batch (with multi-pass retry)
+        if progress_callback:
             progress_callback(current_step, total_steps, f"Translating {len(all_texts)} segments...")
         
+        print(f"Total segments to translate: {len(all_texts)}")
+        
         if all_texts:
-            texts_to_translate = [t[1] for t in all_texts]
+            texts_to_translate = [t[2] for t in all_texts]
             
             def translate_progress(completed, total):
                 nonlocal current_step
@@ -265,17 +305,74 @@ class TranslatedEPUBBuilder(EPUBBuilder):
                         f"Translating: {completed}/{total}"
                     )
             
-            translated = self.translator.translate_texts(texts_to_translate, translate_progress)
+            # Use multi-pass retry if available, fall back to single-pass
+            if hasattr(self.translator, 'translate_texts_with_retry'):
+                translated = self.translator.translate_texts_with_retry(
+                    texts_to_translate,
+                    translate_progress,
+                    is_chinese_fn=lambda t: is_chinese(t),
+                    count_chinese_fn=lambda t: count_chinese_chars(t),
+                )
+            else:
+                translated = self.translator.translate_texts(texts_to_translate, translate_progress)
             
-            # Apply translations back to chapters
-            for i, (chapter_idx, original) in enumerate(all_texts):
-                if translated[i] and translated[i] != original:
-                    chapters[chapter_idx].content = chapters[chapter_idx].content.replace(
-                        original, translated[i], 1
-                    )
+            # Apply translations back
+            for i, (text_type, idx, original) in enumerate(all_texts):
+                if i < len(translated) and translated[i] and translated[i] != original:
+                    if text_type == 'title':
+                        print(f"Translated title: {novel_info.title} -> {translated[i]}")
+                        novel_info.title = translated[i]
+                    elif text_type == 'author':
+                        print(f"Translated author: {novel_info.author} -> {translated[i]}")
+                        novel_info.author = translated[i]
+                    elif text_type == 'chapter_title':
+                        # This is crucial - translating chapter titles fixes the TOC!
+                        chapters[idx].title = translated[i]
+                    elif text_type == 'content':
+                        chapters[idx].content = chapters[idx].content.replace(
+                            original, translated[i], 1
+                        )
         
-        # Phase 3: Build EPUB
+        # Phase 2.5: Translation verification (from fixTranslate.py)
+        if self.verify_translation:
+            self._verify_translations(chapters)
+        
+        # Validate chapters have content
+        for idx, chapter in enumerate(chapters):
+            if not chapter.content or len(chapter.content.strip()) < 10:
+                print(f"Warning: Chapter {idx} '{chapter.title}' has empty/minimal content")
+                if not chapter.content:
+                    chapter.content = "<p>Chapter content not available.</p>"
+        
+        # Phase 3: Build EPUB with translated metadata and chapters
+        print(f"Building EPUB with translated content...")
+        print(f"  Final title: {novel_info.title}")
+        print(f"  Final author: {novel_info.author}")
         return self.build(novel_info, chapters, output_path, progress_callback)
+    
+    def _verify_translations(self, chapters: List[Chapter]):
+        """
+        Verify translation quality by checking for remaining Chinese content.
+        From fixTranslate.py - warns about chapters with significant untranslated text.
+        """
+        self.chapters_with_chinese = []
+        
+        for idx, chapter in enumerate(chapters):
+            if not chapter.content:
+                continue
+            
+            remaining = count_chinese_chars(chapter.content)
+            if remaining > 50:  # More than 50 Chinese chars = significant
+                self.chapters_with_chinese.append((chapter.title, remaining))
+        
+        if self.chapters_with_chinese:
+            print(f"\n  ⚠ Warning: {len(self.chapters_with_chinese)} chapters still have significant Chinese content:")
+            for title, count in self.chapters_with_chinese[:10]:
+                display_title = title[:40] + '...' if len(title) > 40 else title
+                print(f"    - {display_title}: {count} Chinese chars")
+            if len(self.chapters_with_chinese) > 10:
+                print(f"    ... and {len(self.chapters_with_chinese) - 10} more")
+            print("  These may need manual re-translation or the API failed silently.")
     
     def _extract_text_segments(self, html: str) -> List[str]:
         """Extract text segments from HTML for translation."""
@@ -293,3 +390,10 @@ class TranslatedEPUBBuilder(EPUBBuilder):
                     texts.append(text)
         
         return texts
+    
+    def get_translation_warnings(self) -> List[Tuple[str, int]]:
+        """
+        Get list of chapters that still have significant Chinese content.
+        Returns list of (chapter_title, chinese_char_count) tuples.
+        """
+        return self.chapters_with_chinese.copy()

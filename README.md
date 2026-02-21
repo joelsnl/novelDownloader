@@ -9,11 +9,13 @@ Based on WebToEpub extension (by dteviot) and fixTranslate.py (from another proj
 ## Features
 
 - **Download novels** from supported sites (currently: twkan.com, 69shuba.com, uukanshu.cc)
+- **Multi-download mode** — queue up to 7 novels and download them all sequentially with one click
 - **Remove watermarks** and ads automatically
 - **Translate to English** using Google Translate (free, concurrent)
 - **Create EPUB** files ready for e-readers
 - **Select specific chapters** to download
 - **Progress tracking** with cancel support
+- **Auto-updater** with silent background update checks
 
 ## Installation
 
@@ -46,6 +48,8 @@ Based on WebToEpub extension (by dteviot) and fixTranslate.py (from another proj
 
 ## Usage
 
+### Single Mode (default)
+
 1. **Enter URL**: Paste the URL of the novel's main page
    - Example: `https://twkan.com/book/76222.html`
 
@@ -57,9 +61,17 @@ Based on WebToEpub extension (by dteviot) and fixTranslate.py (from another proj
 4. **Options**:
    - ✅ Remove watermarks & ads - Cleans the content
    - ✅ Translate to English - Translates Chinese text
-   - Translation Workers - Number of concurrent translation requests (default: 50)
+   - Translation Workers - Number of concurrent translation requests (default: 100)
 
-5. **Download**: Click "Download EPUB" and choose save location
+5. **Download**: Click "Download EPUB" — saved automatically to your Downloads folder
+
+### Multi Mode
+
+1. **Switch mode**: Click the "Multi" toggle at the top left
+2. **Add URLs**: Enter up to 7 novel URLs (use "+ Add URL" / "- Remove" buttons)
+3. **Fetch All**: Click "Fetch All" to load info for all novels at once
+4. **Download All**: Click "Download All" — each novel is processed sequentially (download → clean → translate → EPUB)
+5. **Summary**: A single popup shows all results when everything is done
 
 ## Supported Sites
 

@@ -192,7 +192,7 @@ class NovelDownloaderApp(ctk.CTk):
         
         ctk.CTkLabel(right_opts, text="Translation Workers:").pack(side="left", padx=5)
         self.workers_entry = ctk.CTkEntry(right_opts, width=60)
-        self.workers_entry.insert(0, "100")
+        self.workers_entry.insert(0, "200")
         self.workers_entry.pack(side="left", padx=5)
         
         # === Progress Section ===
@@ -481,7 +481,7 @@ class NovelDownloaderApp(ctk.CTk):
                 try:
                     workers = int(self.workers_entry.get())
                 except ValueError:
-                    workers = 100
+                    workers = 200
                 translator = GoogleTranslator(max_workers=workers)
             
             # Build EPUB

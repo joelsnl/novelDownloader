@@ -31,7 +31,7 @@ class GoogleTranslator:
         self,
         source_lang: str = 'zh-CN',
         target_lang: str = 'en',
-        max_workers: int = 100,
+        max_workers: int = 200,
         request_timeout: int = 15,
         max_retries: int = 5,
         request_interval: float = 0.0,

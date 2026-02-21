@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Callable
 
 # Current version - UPDATE THIS WITH EACH RELEASE
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # GitHub repository info
 GITHUB_REPO = "joelsnl/novelDownloader"
@@ -119,6 +119,7 @@ def check_for_updates(callback: Optional[Callable[[bool, str, str], None]] = Non
 
 def _find_python() -> Optional[str]:
     """Find a Python interpreter that can run the build script."""
+    _creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
     # Try common Python commands
     python_commands = ['python3', 'python', 'py']
     
@@ -128,7 +129,8 @@ def _find_python() -> Optional[str]:
                 [cmd, '--version'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                creationflags=_creationflags
             )
             if result.returncode == 0 and 'Python 3' in result.stdout:
                 return cmd
@@ -161,9 +163,6 @@ echo Replacing executable...
 del /f "{old_exe}"
 move /y "{new_exe}" "{old_exe}"
 
-echo Starting updated application...
-start "" "{old_exe}"
-
 echo Cleaning up...
 del /f "{app_dir / '_update_backup.exe'}" 2>nul
 (goto) 2>nul & del "%~f0"
@@ -184,9 +183,6 @@ echo "Replacing executable..."
 rm -f "{old_exe}"
 mv "{new_exe}" "{old_exe}"
 chmod +x "{old_exe}"
-
-echo "Starting updated application..."
-"{old_exe}" &
 
 echo "Cleaning up..."
 rm -f "{app_dir / '_update_backup'}"
@@ -355,13 +351,17 @@ def _update_frozen_app(
     if progress_callback:
         progress_callback(45, 100, "Checking dependencies...")
     
+    # Hide console windows on Windows
+    _creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    
     requirements_file = extracted_dir / 'requirements.txt'
     if requirements_file.exists():
         try:
             subprocess.run(
                 [python_cmd, '-m', 'pip', 'install', '-r', str(requirements_file), '-q'],
                 capture_output=True,
-                timeout=120
+                timeout=120,
+                creationflags=_creationflags
             )
         except Exception as e:
             print(f"Warning: Failed to install requirements: {e}")
@@ -371,7 +371,8 @@ def _update_frozen_app(
         subprocess.run(
             [python_cmd, '-m', 'pip', 'install', 'pyinstaller', '-q'],
             capture_output=True,
-            timeout=60
+            timeout=60,
+            creationflags=_creationflags
         )
     except Exception:
         pass
@@ -386,7 +387,8 @@ def _update_frozen_app(
             cwd=str(extracted_dir),
             capture_output=True,
             text=True,
-            timeout=600  # 10 minute timeout for build
+            timeout=600,  # 10 minute timeout for build
+            creationflags=_creationflags
         )
         
         if result.returncode != 0:
@@ -438,10 +440,12 @@ def _update_frozen_app(
     
     # Launch the replacement script
     if sys.platform == 'win32':
-        # On Windows, use START to run in background
+        # On Windows, launch the batch script without a visible console window
         subprocess.Popen(
-            ['cmd', '/c', 'start', '/min', '', str(script_path)],
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            ['cmd', '/c', str(script_path)],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
     else:
         # On Unix, run in background
@@ -457,8 +461,8 @@ def _update_frozen_app(
     
     return (True, 
         "Update downloaded and built successfully!\n\n"
-        "The application will now close and restart with the new version.\n"
-        "Please save any work before clicking OK."
+        "The application will now close to apply the update.\n"
+        "Please restart it manually after it closes."
     )
 
 

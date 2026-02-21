@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Parser for twkan.com (台灣小說網)
 Based on WebToEpub TwkanParser.js

@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 EPUB Builder - Create EPUB files from chapters
 Uses ebooklib for EPUB creation.

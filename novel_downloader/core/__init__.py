@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Core modules for Novel Downloader
 """

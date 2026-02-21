@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Base Parser class and Chapter data structure
 All site-specific parsers inherit from BaseParser

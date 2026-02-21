@@ -4,6 +4,8 @@ Novel Downloader & Translator
 A standalone GUI application for downloading and translating web novels to EPUB.
 
 Based on WebToEpub extension and fixTranslate.py
+
+Author: joelsnl and Anthropic Claude
 """
 
 import os

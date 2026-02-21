@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 XHTML/Content Cleaner - Remove watermarks, ads, and fix structure
 Based on fixTranslate.py XHTMLProcessor - now with ALL features ported.

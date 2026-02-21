@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: joelsnl and Anthropic Claude
 """
 Build script for creating standalone executable using PyInstaller
 """

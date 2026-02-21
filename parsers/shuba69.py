@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Parser for 69shuba.com / 69shu.com (六九书吧)
 Based on WebToEpub 69shuParser.js

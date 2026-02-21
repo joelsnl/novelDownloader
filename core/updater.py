@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Auto-updater for Novel Downloader
 Checks GitHub releases for updates and can download/install them.

@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Google Translate (Free) - Concurrent translation with persistent retry
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: joelsnl and Anthropic Claude
 """
 Novel Downloader & Translator
 A standalone GUI application for downloading and translating web novels to EPUB.

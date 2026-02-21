@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Site parsers for Novel Downloader
 Import this module to register all parsers

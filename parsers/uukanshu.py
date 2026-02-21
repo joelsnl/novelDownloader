@@ -1,3 +1,4 @@
+# Author: joelsnl and Anthropic Claude
 """
 Parser for uukanshu.cc (UU看書繁體免費小說閱讀網)
 Traditional Chinese novel site with direct chapter listing on the main page.

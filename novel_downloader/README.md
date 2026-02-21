@@ -6,7 +6,7 @@ Based on WebToEpub extension and fixTranslate.py.
 
 ## Features
 
-- **Download novels** from supported sites (currently: twkan.com)
+- **Download novels** from supported sites (currently: twkan.com, 69shuba.com, uukanshu.cc)
 - **Remove watermarks** and ads automatically
 - **Translate to English** using Google Translate (free, concurrent)
 - **Create EPUB** files ready for e-readers
@@ -64,6 +64,8 @@ Based on WebToEpub extension and fixTranslate.py.
 | Site | URL Pattern | Status |
 |------|-------------|--------|
 | twkan.com | `https://twkan.com/book/{id}.html` | ✅ Working |
+| 69shuba.com | `https://69shuba.com/book/{id}/` | ✅ Working |
+| uukanshu.cc | `https://uukanshu.cc/book/{id}/` | ✅ Working |
 
 ## Adding New Sites
 
@@ -111,7 +113,9 @@ novel_downloader/
 │   └── epub_builder.py # EPUB creation
 └── parsers/
     ├── __init__.py
-    └── twkan.py       # twkan.com parser
+    ├── twkan.py       # twkan.com parser
+    ├── shuba69.py     # 69shuba.com parser
+    └── uukanshu.py    # uukanshu.cc parser
 ```
 
 ## Troubleshooting
